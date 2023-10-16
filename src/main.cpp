@@ -1,99 +1,116 @@
-//Sensor Data Management.ino
-// Planning to add movingavg
-
+// Sensor Data Management.ino
+// Can currently only handle 1 sensor.
+// Will add support for multiple sensors soon.
 #include <Arduino.h>
 
-// Functions that will be used
-void smooth(int sensor_pin, int num_readings, String sensor_name);
-void calibrate(int sensor_pin, unsigned long calibrate_time, int &sensor_max, int &sensor_min); // Used &sensor_max and &sensor_min to allow for update of the variables.
-void read_sensor(int sensor_pin, int sensor_min, int sensor_max);
 
-// Variables
-int sensor_min = 1023;  
-int sensor_max = 0;
-int sensor_pin = A0;
-String sensor_name = "Photoresistor";
-unsigned long calibrate_time = 10000;
+// Sensors
+String sensor_name = "insert_name";    // Sensor label
+const int sensor_pin = A0;             // Sensor pin
+int sensor_min = 1023;                 // minimum sensor value
+int sensor_max = 0;                    // maximum sensor value
 
-// Readings Array
+// Array
 int num_readings = 10;
-int readings[10];
-int read_index = 0;
+int* readings = nullptr;
+static int read_index = 0;
 
-unsigned long last_reading_time = 0;
-unsigned long reading_interval = 100;
+// Intervals, Frequency
+const unsigned long calibrate_duration = 10000;  // Calibration run-time in milliseconds
+const unsigned long reading_duration = 60000;    // Reading run-time in milliseconds
+const unsigned long reading_frequency = 100;     // Reading frequency, reads/millisecond
+
+// Tracking variables
+unsigned long calibration_start_time = 0;        // Keeps track of calibration run-time
+unsigned long reading_start_time = 0;            // Keeps track of reading run-time
+static unsigned long last_reading_time = 0;      // Keeps track of last read
+
+// Functions
+void calculate_moving_average(int sensor_pin, int* readings, int num_readings, String sensor_name);
+void calibrate(int sensor_pin, unsigned long calibrate_duration, int &sensor_max, int &sensor_min);
+void read_sensor(int sensor_pin, int &sensor_min, int &sensor_max);
+void cleanup();
+
+// States
+enum State {
+    CALIBRATION, // Runs the 'calibrate' function
+    READING,     // Runs the 'read_sensor' and 'calulate_moving_average' functions
+    CLEANUP,     // Runs the 'cleanup' function and wipes the sensor data array
+};
+State current_state = CALIBRATION; // Initial state
+
+
 
 void setup() {
-  Serial.begin(9600);
-  calibrate(sensor_pin, calibrate_time, sensor_min, sensor_max);
+    Serial.begin(9600);                // Initialise serial communication
+    readings = new int[num_readings];  // Create readings array from pointer
 }
 
 void loop() {
-  read_sensor(sensor_pin, sensor_min, sensor_max);
-  smooth(sensor_pin, num_readings, sensor_name);
+    unsigned long current_time = millis();
+
+    switch (current_state) {
+        case CALIBRATION:
+            calibrate(sensor_pin, calibrate_duration, sensor_max, sensor_min);           // Calibrate the sensor
+            if (current_time - calibration_start_time >= calibrate_duration) {           // Change state after specified calibration time has passed
+                current_state = READING;
+                reading_start_time = current_time;
+            }
+            break;
+
+        case READING:
+            read_sensor(sensor_pin, sensor_min, sensor_max);                             // Read the sensor
+            calculate_moving_average(sensor_pin, readings, num_readings, sensor_name);   // Calculate the moving average
+            if (current_time - reading_start_time >= reading_duration) {                 // Change state after specified reading time has passed
+                current_state = CLEANUP;
+            }
+            break;
+
+        case CLEANUP:
+            cleanup();
+            current_state = CALIBRATION;
+            break;
+    }
 }
 
-void smooth(int sensor_pin, int num_readings, String sensor_name) {
+void calculate_moving_average(int sensor_pin, int* readings, int num_readings, String sensor_name) {
+    unsigned long current_time = millis(); // Added current_time variable
     int total = 0;
-    int average = 0;
 
-    for (int current_reading = 0; current_reading < num_readings; current_reading++) {
-        readings[current_reading] = 0;
-    }
+    if (current_time - last_reading_time >= reading_frequency) {
+        total = total - readings[read_index];
+        readings[read_index] = analogRead(sensor_pin);
+        total += readings[read_index];
 
-    while (true) {
-        unsigned long current_time = millis();
+        read_index = (read_index + 1) % num_readings;
 
-        if (current_time - last_reading_time >= reading_interval) {
-            total = total - readings[read_index];
-            readings[read_index] = analogRead(sensor_pin);
-            total = total + readings[read_index];
-            read_index = (read_index + 1) % num_readings;
+        float moving_average = (float)total / num_readings;
 
-            average = total / num_readings;
-            Serial.print(sensor_name);
-            Serial.print(" average: ");
-            Serial.println(average);
+        Serial.print(sensor_name);
+        Serial.print(" moving average: ");
+        Serial.println(moving_average);
 
-            last_reading_time = current_time;
-
-            /* 
-            Pseudo code
-            if (serial input = quit) {
-                break;
-            */
-        }
+        last_reading_time = current_time;
     }
 }
 
-void read_sensor(int sensor_pin, int sensor_min, int sensor_max) {
-  int sensor_value = analogRead(sensor_pin);
-  sensor_value = constrain(sensor_value, sensor_min, sensor_max);
-  int mapped_value = map(sensor_value, sensor_min, sensor_max, 0, 1000);
-  Serial.println(mapped_value);
+void read_sensor(int sensor_pin, int &sensor_min, int &sensor_max) {
+    int sensor_value = analogRead(sensor_pin);
+    sensor_value = constrain(sensor_value, sensor_min, sensor_max);
+    int mapped_value = map(sensor_value, sensor_min, sensor_max, 0, 1000);
 }
 
-void calibrate(int sensor_pin, unsigned long calibrate_time, int &sensor_min, int &sensor_max) {
-    int sensor_value = 0;
-    unsigned long calibration_start_time = millis();
+void calibrate(int sensor_pin, int &sensor_max, int &sensor_min) {
+    int sensor_value = analogRead(sensor_pin);
 
-    while (millis() - calibration_start_time < calibrate_time) {
-        sensor_value = analogRead(sensor_pin);
-        if (sensor_value > sensor_max) {
-            sensor_max = sensor_value;
-        }
-        if (sensor_value < sensor_min) {
-            sensor_min = sensor_value;
-        }
+    if (sensor_value > sensor_max) {
+        sensor_max = sensor_value;
+    }
+    if (sensor_value < sensor_min) {
+        sensor_min = sensor_value;
     }
 }
 
-/* 
-Make a sensor-array and a function that iterates over the whole array instead of calling the same function on multiple sensors.
-
-void define_sensors() {
-  for(int current_sensor = 0; current_sensor < num_sensors; current_sensor++) {
-    current_sensor = output[current_sensor]
-  }
+void cleanup() {
+    delete[] readings; // Deletes the array
 }
-*/
